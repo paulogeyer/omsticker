@@ -8,6 +8,7 @@ struct UsbDrive {
     QString byId;
     QString model;
     QString vendor;
+    QString serial;
     qint64 sizeBytes = 0;
     bool usb = false;
     bool removable = false;

@@ -27,6 +27,10 @@ FlashSession::FlashSession(QObject *parent)
         }
         if (m_reported)
             return;
+        if (m_cancelled) {
+            report(false, QStringLiteral("Write aborted. The USB stick is incomplete and not bootable until you flash it again."));
+            return;
+        }
         if (status != QProcess::NormalExit) {
             report(false, QStringLiteral("Helper process crashed"));
             return;
@@ -67,22 +71,33 @@ bool FlashSession::running() const
 }
 
 void FlashSession::start(const QString &iso, const QString &device, const QString &filesystem,
-                         const QString &label, bool dataPartition)
+                         const QString &label, bool dataPartition, qint64 offset)
 {
     if (running())
         return;
     m_buffer.clear();
     m_reported = false;
+    m_cancelled = false;
     const QString helper = helperPath();
     if (!QFileInfo::exists(helper)) {
         report(false, QStringLiteral("USB writer helper was not found"));
         return;
     }
     QStringList args{QStringLiteral("flash"), QStringLiteral("--iso"), iso, QStringLiteral("--device"),
-                     device, QStringLiteral("--filesystem"), filesystem, QStringLiteral("--label"), label};
+                     device, QStringLiteral("--filesystem"), filesystem, QStringLiteral("--label"), label,
+                     QStringLiteral("--offset"), QString::number(offset)};
     if (!dataPartition)
         args << QStringLiteral("--no-data-partition");
     m_process.start(helper, args);
+}
+
+void FlashSession::cancel()
+{
+    if (!running())
+        return;
+    m_cancelled = true;
+    m_process.kill();
+    m_process.waitForFinished(3000);
 }
 
 void FlashSession::handleLine(const QByteArray &line)
@@ -98,7 +113,7 @@ void FlashSession::handleLine(const QByteArray &line)
         const qint64 current = obj.value(QStringLiteral("current")).toVariant().toLongLong();
         const qint64 total = obj.value(QStringLiteral("total")).toVariant().toLongLong();
         const int percent = total > 0 ? static_cast<int>((current * 100) / total) : 0;
-        emit progressChanged(percent, current, total);
+        emit progressChanged(percent, current, total, obj.value(QStringLiteral("synced")).toBool());
     } else if (type == QLatin1String("error")) {
         report(false, obj.value(QStringLiteral("message")).toString());
     } else if (type == QLatin1String("done")) {

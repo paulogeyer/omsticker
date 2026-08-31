@@ -202,11 +202,27 @@ bool Flasher::writeIso()
         return fail(QStringLiteral("Cannot stat ISO"));
     }
     const qint64 total = st.st_size;
+    qint64 written = resumeOffset;
+    if (written < 0 || written > total)
+        written = 0;
+    if (written == total) {
+        ::close(isoFd);
+        return true;
+    }
+    if (written > 0) {
+        if (::lseek(isoFd, written, SEEK_SET) < 0 || ::lseek(devFd, written, SEEK_SET) < 0) {
+            ::close(isoFd);
+            return fail(QStringLiteral("Cannot seek to resume offset"));
+        }
+        emitBytes(proto::progress(written, total, QStringLiteral("Resuming write..."), true));
+    }
+
     const size_t bufSize = 4 * 1024 * 1024;
     QByteArray buffer(static_cast<int>(bufSize), Qt::Uninitialized);
+    const qint64 syncEvery = 32ll * 1024 * 1024;
+    qint64 lastSync = written;
+    int lastPercent = total > 0 ? static_cast<int>((written * 100) / total) : 0;
 
-    qint64 written = 0;
-    int lastPercent = -1;
     while (written < total) {
         const size_t chunk = static_cast<size_t>(qMin<qint64>(bufSize, total - written));
         const ssize_t got = ::read(isoFd, buffer.data(), chunk);
@@ -227,16 +243,21 @@ bool Flasher::writeIso()
         }
         written += got;
         const int percent = total > 0 ? static_cast<int>((written * 100) / total) : 100;
-        if (percent != lastPercent) {
+        const bool syncNow = (written - lastSync) >= syncEvery || written == total;
+        if (syncNow) {
+            if (::fsync(devFd) != 0) {
+                ::close(isoFd);
+                return fail(QStringLiteral("fsync failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
+            }
+            lastSync = written;
             lastPercent = percent;
-            emitBytes(proto::progress(written, total, QStringLiteral("Writing image...")));
+            emitBytes(proto::progress(written, total, QStringLiteral("Writing image..."), true));
+        } else if (percent != lastPercent) {
+            lastPercent = percent;
+            emitBytes(proto::progress(written, total, QStringLiteral("Writing image..."), false));
         }
     }
 
-    if (::fsync(devFd) != 0) {
-        ::close(isoFd);
-        return fail(QStringLiteral("fsync failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
-    }
     ::close(isoFd);
     return true;
 }

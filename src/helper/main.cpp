@@ -21,6 +21,8 @@ int main(int argc, char *argv[])
                       QStringLiteral("name"), QStringLiteral("OMARCHY")});
     parser.addOption({QStringLiteral("no-data-partition"),
                       QStringLiteral("Do not use leftover space")});
+    parser.addOption({QStringLiteral("offset"), QStringLiteral("Resume write at this byte offset"),
+                      QStringLiteral("bytes"), QStringLiteral("0")});
     parser.process(app);
 
     const QStringList positional = parser.positionalArguments();
@@ -34,5 +36,6 @@ int main(int argc, char *argv[])
     flasher.filesystem = parser.value(QStringLiteral("filesystem")).toLower();
     flasher.label = parser.value(QStringLiteral("label"));
     flasher.makeDataPartition = !parser.isSet(QStringLiteral("no-data-partition"));
+    flasher.resumeOffset = parser.value(QStringLiteral("offset")).toLongLong();
     return flasher.run();
 }

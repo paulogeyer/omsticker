@@ -3,6 +3,7 @@
 #include "DeviceScanner.h"
 #include "FlashSession.h"
 #include "IsoDownloader.h"
+#include "WriteCheckpoint.h"
 
 #include <QElapsedTimer>
 #include <QMainWindow>
@@ -45,14 +46,19 @@ private:
     QPushButton *m_refreshButton = nullptr;
     QElapsedTimer m_downloadClock;
     QElapsedTimer m_writeClock;
+    WriteCheckpoint m_writeCheckpoint;
+    qint64 m_writeOffsetStart = 0;
 
     void rebuildDriveList();
     void detectExistingIso();
     void setBusy(bool busy);
     void updateSpaceHint();
     void flash();
+    bool confirmAbort();
+    void abortWrite();
     qint64 selectedDriveSize() const;
     QString selectedDevice() const;
+    QString selectedDriveSerial() const;
     QString selectedFilesystem() const;
     void setIsoPath(const QString &path);
 };

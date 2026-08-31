@@ -12,6 +12,7 @@ public:
     QString filesystem = QStringLiteral("exfat");
     QString label = QStringLiteral("OMARCHY");
     bool makeDataPartition = true;
+    qint64 resumeOffset = 0;
 
     int run();
 

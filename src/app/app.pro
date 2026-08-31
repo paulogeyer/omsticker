@@ -5,7 +5,7 @@ TARGET = omsticker
 DESTDIR = $$PWD/../../build
 
 SOURCES = main.cpp MainWindow.cpp DeviceScanner.cpp FlashSession.cpp IsoDownloader.cpp
-HEADERS = MainWindow.h DeviceScanner.h FlashSession.h IsoDownloader.h Style.h ../shared/Protocol.h
+HEADERS = MainWindow.h DeviceScanner.h FlashSession.h IsoDownloader.h Style.h WriteCheckpoint.h ../shared/Protocol.h
 INCLUDEPATH += ../shared
 RESOURCES += ../../data/resources.qrc
 

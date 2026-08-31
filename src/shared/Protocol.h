@@ -18,12 +18,13 @@ inline QByteArray status(const QString &message)
                  {QStringLiteral("message"), message}});
 }
 
-inline QByteArray progress(qint64 current, qint64 total, const QString &message)
+inline QByteArray progress(qint64 current, qint64 total, const QString &message, bool synced = false)
 {
     return line({{QStringLiteral("type"), QStringLiteral("progress")},
                  {QStringLiteral("current"), current},
                  {QStringLiteral("total"), total},
-                 {QStringLiteral("message"), message}});
+                 {QStringLiteral("message"), message},
+                 {QStringLiteral("synced"), synced}});
 }
 
 inline QByteArray error(const QString &message, bool imageWritten = false)

@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -276,33 +277,50 @@ MainWindow::MainWindow(QWidget *parent)
         m_labelEdit->setEnabled(checked);
         updateSpaceHint();
     });
-    connect(m_flashButton, &QPushButton::clicked, this, &MainWindow::flash);
+    connect(m_flashButton, &QPushButton::clicked, this, [this] {
+        if (m_flash.running())
+            abortWrite();
+        else
+            flash();
+    });
     connect(&m_flash, &FlashSession::statusChanged, m_status, &QLabel::setText);
     connect(&m_flash, &FlashSession::progressChanged, this,
-            [this](int percent, qint64 current, qint64 total) {
+            [this](int percent, qint64 current, qint64 total, bool synced) {
                 if (!m_writeClock.isValid())
                     m_writeClock.start();
                 m_progress->setRange(0, 100);
                 m_progress->setValue(percent);
+                const qint64 session = qMax(qint64(0), current - m_writeOffsetStart);
+                const qint64 remainTotal = qMax(qint64(0), total - m_writeOffsetStart);
                 m_status->setText(QStringLiteral("Writing image… %1 / %2 · %3 · %4 left")
                                       .arg(QLocale().formattedDataSize(current),
                                            total > 0 ? QLocale().formattedDataSize(total)
                                                      : QStringLiteral("?"),
-                                           formatSpeed(current, m_writeClock.elapsed()),
-                                           formatEta(current, total, m_writeClock.elapsed())));
+                                           formatSpeed(session, m_writeClock.elapsed()),
+                                           formatEta(session, remainTotal, m_writeClock.elapsed())));
+                if (synced) {
+                    m_writeCheckpoint.offset = current;
+                    saveWriteCheckpoint(m_writeCheckpoint);
+                }
             });
     connect(&m_flash, &FlashSession::finished, this, [this](bool ok, const QString &message) {
+        m_flashButton->setText(QStringLiteral("Flash USB Stick"));
         setBusy(false);
         m_status->setText(message);
         m_status->setObjectName(ok ? QStringLiteral("ok") : QStringLiteral("warning"));
         m_status->style()->unpolish(m_status);
         m_status->style()->polish(m_status);
-        if (ok)
+        if (ok) {
             m_progress->setValue(100);
+            clearWriteCheckpoint();
+        }
         QMessageBox box(this);
-        box.setWindowTitle(ok ? QStringLiteral("Done") : QStringLiteral("Flash failed"));
+        box.setWindowTitle(ok ? QStringLiteral("Done")
+                              : m_flash.cancelled() ? QStringLiteral("Aborted")
+                                                    : QStringLiteral("Flash failed"));
         box.setText(message);
-        box.setIcon(ok ? QMessageBox::Information : QMessageBox::Critical);
+        box.setIcon(ok ? QMessageBox::Information
+                       : m_flash.cancelled() ? QMessageBox::Warning : QMessageBox::Critical);
         box.exec();
         m_scanner.refresh();
     });
@@ -323,6 +341,7 @@ void MainWindow::rebuildDriveList()
         m_driveCombo->addItem(drive.displayName(), drive.byId.isEmpty() ? drive.path : drive.byId);
         m_driveCombo->setItemData(m_driveCombo->count() - 1, drive.sizeBytes, Qt::UserRole + 1);
         m_driveCombo->setItemData(m_driveCombo->count() - 1, drive.path, Qt::UserRole + 2);
+        m_driveCombo->setItemData(m_driveCombo->count() - 1, drive.serial, Qt::UserRole + 3);
     }
     if (m_driveCombo->count() == 0)
         m_driveCombo->addItem(QStringLiteral("No USB drive detected"));
@@ -404,31 +423,77 @@ void MainWindow::flash()
         QMessageBox::warning(this, QStringLiteral("No drive"), QStringLiteral("Select a USB drive."));
         return;
     }
-    const qint64 leftover = selectedDriveSize() - QFileInfo(iso).size();
-    QString extra;
-    if (m_dataCheck->isChecked() && leftover > 16ll * 1024 * 1024) {
-        extra = QStringLiteral("\n\nLeftover %1 will be formatted as %2 (%3).")
-                    .arg(QLocale().formattedDataSize(leftover), m_fsCombo->currentText(),
-                         m_labelEdit->text().trimmed().isEmpty() ? QStringLiteral("unlabeled")
-                                                                 : m_labelEdit->text().trimmed());
+    const QFileInfo isoInfo(iso);
+    const QString isoAbs = isoInfo.absoluteFilePath();
+    const qint64 isoSize = isoInfo.size();
+    const qint64 isoMtime = isoInfo.lastModified().toSecsSinceEpoch();
+    const QString serial = selectedDriveSerial();
+    const qint64 driveSize = selectedDriveSize();
+    const qint64 leftover = driveSize - isoSize;
+
+    qint64 offset = 0;
+    const WriteCheckpoint previous = loadWriteCheckpoint();
+    if (previous.offset > 0 && previous.matches(isoAbs, isoSize, isoMtime, device, serial, driveSize)) {
+        QMessageBox box(this);
+        box.setIcon(QMessageBox::Question);
+        box.setWindowTitle(QStringLiteral("Resume write?"));
+        if (previous.offset >= isoSize) {
+            box.setText(QStringLiteral("The ISO was already written to this drive.\nFinish leftover space, or start again from scratch?"));
+        } else {
+            const int pct = isoSize > 0 ? static_cast<int>((previous.offset * 100) / isoSize) : 0;
+            box.setText(QStringLiteral("A previous write can be resumed at %1 of %2 (%3%).")
+                            .arg(QLocale().formattedDataSize(previous.offset),
+                                 QLocale().formattedDataSize(isoSize), QString::number(pct)));
+        }
+        auto *resumeBtn = box.addButton(QStringLiteral("Resume"), QMessageBox::AcceptRole);
+        box.addButton(QStringLiteral("Start again"), QMessageBox::DestructiveRole);
+        box.addButton(QMessageBox::Cancel);
+        box.exec();
+        if (box.clickedButton() == resumeBtn)
+            offset = qMin(previous.offset, isoSize);
+        else if (box.clickedButton() == box.button(QMessageBox::Cancel) || !box.clickedButton())
+            return;
+        else
+            clearWriteCheckpoint();
     }
-    const QString driveName = m_driveCombo->currentText();
-    const auto answer = QMessageBox::warning(
-        this, QStringLiteral("Erase USB drive?"),
-        QStringLiteral("This will erase all data on:\n\n%1\n\nand write:\n%2%3\n\nThis cannot be undone.")
-            .arg(driveName, iso, extra),
-        QMessageBox::Cancel | QMessageBox::Ok, QMessageBox::Cancel);
-    if (answer != QMessageBox::Ok)
-        return;
+
+    if (offset == 0) {
+        QString extra;
+        if (m_dataCheck->isChecked() && leftover > 16ll * 1024 * 1024) {
+            extra = QStringLiteral("\n\nLeftover %1 will be formatted as %2 (%3).")
+                        .arg(QLocale().formattedDataSize(leftover), m_fsCombo->currentText(),
+                             m_labelEdit->text().trimmed().isEmpty() ? QStringLiteral("unlabeled")
+                                                                     : m_labelEdit->text().trimmed());
+        }
+        const auto answer = QMessageBox::warning(
+            this, QStringLiteral("Erase USB drive?"),
+            QStringLiteral("This will erase all data on:\n\n%1\n\nand write:\n%2%3\n\nThis cannot be undone.")
+                .arg(m_driveCombo->currentText(), isoAbs, extra),
+            QMessageBox::Cancel | QMessageBox::Ok, QMessageBox::Cancel);
+        if (answer != QMessageBox::Ok)
+            return;
+    }
+
+    m_writeCheckpoint.isoPath = isoAbs;
+    m_writeCheckpoint.isoSize = isoSize;
+    m_writeCheckpoint.isoMtime = isoMtime;
+    m_writeCheckpoint.devicePath = device;
+    m_writeCheckpoint.deviceSerial = serial;
+    m_writeCheckpoint.deviceSize = driveSize;
+    m_writeCheckpoint.offset = offset;
+    saveWriteCheckpoint(m_writeCheckpoint);
+    m_writeOffsetStart = offset;
 
     setBusy(true);
-    m_progress->setValue(0);
+    m_flashButton->setEnabled(true);
+    m_flashButton->setText(QStringLiteral("Abort write"));
+    m_progress->setValue(isoSize > 0 ? static_cast<int>((offset * 100) / isoSize) : 0);
     m_writeClock.invalidate();
-    m_status->setText(QStringLiteral("Starting..."));
-    m_flash.start(QFileInfo(iso).absoluteFilePath(), device, selectedFilesystem(),
+    m_status->setText(offset > 0 ? QStringLiteral("Resuming...") : QStringLiteral("Starting..."));
+    m_flash.start(isoAbs, device, selectedFilesystem(),
                   m_labelEdit->text().trimmed().isEmpty() ? QStringLiteral("OMARCHY")
                                                           : m_labelEdit->text().trimmed(),
-                  m_dataCheck->isChecked());
+                  m_dataCheck->isChecked(), offset);
 }
 
 qint64 MainWindow::selectedDriveSize() const
@@ -445,6 +510,13 @@ QString MainWindow::selectedDevice() const
     return m_driveCombo->currentData().toString();
 }
 
+QString MainWindow::selectedDriveSerial() const
+{
+    if (m_scanner.drives().isEmpty())
+        return {};
+    return m_driveCombo->currentData(Qt::UserRole + 3).toString();
+}
+
 QString MainWindow::selectedFilesystem() const
 {
     const QString id = m_fsCombo->currentData().toString();
@@ -457,13 +529,33 @@ void MainWindow::setIsoPath(const QString &path)
     updateSpaceHint();
 }
 
+bool MainWindow::confirmAbort()
+{
+    return QMessageBox::warning(
+               this, QStringLiteral("Abort write?"),
+               QStringLiteral("This stops the write immediately.\n\n"
+                              "The USB stick will be incomplete and not bootable until you flash it again."),
+               QMessageBox::Cancel | QMessageBox::Ok, QMessageBox::Cancel)
+        == QMessageBox::Ok;
+}
+
+void MainWindow::abortWrite()
+{
+    if (!m_flash.running() || !confirmAbort())
+        return;
+    m_flashButton->setEnabled(false);
+    m_status->setText(QStringLiteral("Aborting..."));
+    m_flash.cancel();
+}
+
 void MainWindow::closeEvent(QCloseEvent *event)
 {
     if (m_flash.running()) {
-        event->ignore();
-        QMessageBox::information(this, QStringLiteral("Busy"),
-                                 QStringLiteral("Wait for the USB write to finish before closing."));
-        return;
+        if (!confirmAbort()) {
+            event->ignore();
+            return;
+        }
+        m_flash.cancel();
     }
     if (m_downloader.running())
         m_downloader.cancel();

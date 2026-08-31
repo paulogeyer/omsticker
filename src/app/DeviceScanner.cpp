@@ -53,6 +53,7 @@ void DeviceScanner::refresh()
         drive.path = obj.value(QStringLiteral("path")).toString();
         drive.model = obj.value(QStringLiteral("model")).toString();
         drive.vendor = obj.value(QStringLiteral("vendor")).toString();
+        drive.serial = obj.value(QStringLiteral("serial")).toString();
         drive.sizeBytes = obj.value(QStringLiteral("size")).toVariant().toLongLong();
         drive.usb = usb;
         drive.removable = removable;
