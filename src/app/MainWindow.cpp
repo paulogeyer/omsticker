@@ -33,6 +33,35 @@ QString isoDownloadDir()
     return path;
 }
 
+QString formatSpeed(qint64 bytes, qint64 elapsedMs)
+{
+    if (elapsedMs < 200 || bytes <= 0)
+        return QStringLiteral("…");
+    const qint64 bps = (bytes * 1000) / elapsedMs;
+    return QLocale().formattedDataSize(bps) + QStringLiteral("/s");
+}
+
+QString formatEta(qint64 bytes, qint64 total, qint64 elapsedMs)
+{
+    if (total <= 0 || bytes <= 0 || elapsedMs < 500)
+        return QStringLiteral("…");
+    if (bytes >= total)
+        return QStringLiteral("0s");
+    const qint64 bps = (bytes * 1000) / elapsedMs;
+    if (bps <= 0)
+        return QStringLiteral("…");
+    qint64 secs = (total - bytes) / bps;
+    const qint64 hours = secs / 3600;
+    secs %= 3600;
+    const qint64 mins = secs / 60;
+    secs %= 60;
+    if (hours > 0)
+        return QStringLiteral("%1h %2m").arg(hours).arg(mins, 2, 10, QLatin1Char('0'));
+    if (mins > 0)
+        return QStringLiteral("%1m %2s").arg(mins).arg(secs, 2, 10, QLatin1Char('0'));
+    return QStringLiteral("%1s").arg(secs);
+}
+
 QFrame *makeCard()
 {
     auto *card = new QFrame;
@@ -194,6 +223,7 @@ MainWindow::MainWindow(QWidget *parent)
             m_downloader.cancel();
             return;
         }
+        m_downloadClock.invalidate();
         m_downloader.start(isoDownloadDir());
         setBusy(true);
         m_downloadButton->setEnabled(true);
@@ -206,6 +236,8 @@ MainWindow::MainWindow(QWidget *parent)
             });
     connect(&m_downloader, &IsoDownloader::progressChanged, this,
             [this](qint64 received, qint64 total) {
+                if (!m_downloadClock.isValid())
+                    m_downloadClock.start();
                 if (total > 0) {
                     m_progress->setRange(0, 100);
                     m_progress->setValue(static_cast<int>((received * 100) / total));
@@ -213,11 +245,13 @@ MainWindow::MainWindow(QWidget *parent)
                     m_progress->setRange(0, 0);
                 }
                 const QString ver = m_downloader.version();
-                m_status->setText(QStringLiteral("Downloading Omarchy %1… %2 / %3")
+                m_status->setText(QStringLiteral("Downloading Omarchy %1… %2 / %3 · %4 · %5 left")
                                       .arg(ver.isEmpty() ? QStringLiteral("ISO") : ver,
                                            QLocale().formattedDataSize(received),
                                            total > 0 ? QLocale().formattedDataSize(total)
-                                                     : QStringLiteral("?")));
+                                                     : QStringLiteral("?"),
+                                           formatSpeed(received, m_downloadClock.elapsed()),
+                                           formatEta(received, total, m_downloadClock.elapsed())));
             });
     connect(&m_downloader, &IsoDownloader::finished, this, [this](bool ok, const QString &value) {
         m_downloadButton->setText(QStringLiteral("Download latest Omarchy ISO"));
@@ -245,9 +279,17 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_flashButton, &QPushButton::clicked, this, &MainWindow::flash);
     connect(&m_flash, &FlashSession::statusChanged, m_status, &QLabel::setText);
     connect(&m_flash, &FlashSession::progressChanged, this,
-            [this](int percent, qint64, qint64) {
+            [this](int percent, qint64 current, qint64 total) {
+                if (!m_writeClock.isValid())
+                    m_writeClock.start();
                 m_progress->setRange(0, 100);
                 m_progress->setValue(percent);
+                m_status->setText(QStringLiteral("Writing image… %1 / %2 · %3 · %4 left")
+                                      .arg(QLocale().formattedDataSize(current),
+                                           total > 0 ? QLocale().formattedDataSize(total)
+                                                     : QStringLiteral("?"),
+                                           formatSpeed(current, m_writeClock.elapsed()),
+                                           formatEta(current, total, m_writeClock.elapsed())));
             });
     connect(&m_flash, &FlashSession::finished, this, [this](bool ok, const QString &message) {
         setBusy(false);
@@ -381,6 +423,7 @@ void MainWindow::flash()
 
     setBusy(true);
     m_progress->setValue(0);
+    m_writeClock.invalidate();
     m_status->setText(QStringLiteral("Starting..."));
     m_flash.start(QFileInfo(iso).absoluteFilePath(), device, selectedFilesystem(),
                   m_labelEdit->text().trimmed().isEmpty() ? QStringLiteral("OMARCHY")

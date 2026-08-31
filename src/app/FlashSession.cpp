@@ -99,7 +99,6 @@ void FlashSession::handleLine(const QByteArray &line)
         const qint64 total = obj.value(QStringLiteral("total")).toVariant().toLongLong();
         const int percent = total > 0 ? static_cast<int>((current * 100) / total) : 0;
         emit progressChanged(percent, current, total);
-        emit statusChanged(obj.value(QStringLiteral("message")).toString());
     } else if (type == QLatin1String("error")) {
         report(false, obj.value(QStringLiteral("message")).toString());
     } else if (type == QLatin1String("done")) {

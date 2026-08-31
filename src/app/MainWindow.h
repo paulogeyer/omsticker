@@ -4,6 +4,7 @@
 #include "FlashSession.h"
 #include "IsoDownloader.h"
 
+#include <QElapsedTimer>
 #include <QMainWindow>
 
 class QCheckBox;
@@ -42,6 +43,8 @@ private:
     QPushButton *m_browseButton = nullptr;
     QPushButton *m_downloadButton = nullptr;
     QPushButton *m_refreshButton = nullptr;
+    QElapsedTimer m_downloadClock;
+    QElapsedTimer m_writeClock;
 
     void rebuildDriveList();
     void detectExistingIso();
