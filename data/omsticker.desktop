@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=OmSticker
+GenericName=Omarchy USB Creator
+Comment=Create a bootable Omarchy USB stick and use the leftover space
+Exec=omsticker
+Icon=omsticker
+Terminal=false
+Categories=System;Utility;
+Keywords=usb;iso;omarchy;flash;stick;bootable;
+StartupNotify=true
+StartupWMClass=omsticker

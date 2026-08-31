@@ -1,0 +1,14 @@
+build/
+*.o
+*.moc
+moc_*.cpp
+qrc_*.cpp
+Makefile
+src/app/Makefile
+src/helper/Makefile
+src/app/omsticker
+src/helper/omsticker-helper
+.qmake.stash
+moc_predefs.h
+*.user
+.cache/
