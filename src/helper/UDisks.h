@@ -12,6 +12,7 @@ public:
     bool unmountTree(const QString &device);
     int openWriteFd(const QString &device);
     bool rescan(const QString &device);
+    bool waitForBlock(const QString &device, int timeoutMs = 20000);
     bool formatPartition(const QString &partition, const QString &filesystem, const QString &label);
 
 private:

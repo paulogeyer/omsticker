@@ -3,6 +3,7 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QRegularExpression>
 #include <QThread>
 
@@ -13,6 +14,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -21,6 +23,37 @@ void emitBytes(const QByteArray &bytes)
 {
     fwrite(bytes.constData(), 1, static_cast<size_t>(bytes.size()), stdout);
     fflush(stdout);
+}
+
+bool writeAll(int fd, const char *data, size_t len)
+{
+    size_t off = 0;
+    while (off < len) {
+        const ssize_t put = ::write(fd, data + off, len - off);
+        if (put < 0) {
+            if (errno == EINTR)
+                continue;
+            return false;
+        }
+        off += static_cast<size_t>(put);
+    }
+    return true;
+}
+
+QString probeFs(const QString &device)
+{
+    QProcess process;
+    process.start(QStringLiteral("lsblk"),
+                  {QStringLiteral("-no"), QStringLiteral("FSTYPE"), device});
+    process.waitForFinished(4000);
+    return QString::fromUtf8(process.readAllStandardOutput()).trimmed().toLower();
+}
+
+QString expectedFs(const QString &filesystem)
+{
+    if (filesystem == QLatin1String("fat32"))
+        return QStringLiteral("vfat");
+    return filesystem;
 }
 
 bool isLinuxFs(const QString &filesystem)
@@ -217,37 +250,63 @@ bool Flasher::writeIso()
         emitBytes(proto::progress(written, total, QStringLiteral("Resuming write..."), true));
     }
 
-    const size_t bufSize = 4 * 1024 * 1024;
-    QByteArray buffer(static_cast<int>(bufSize), Qt::Uninitialized);
-    const qint64 syncEvery = 32ll * 1024 * 1024;
+    posix_fadvise(isoFd, 0, 0, POSIX_FADV_SEQUENTIAL);
+    posix_fadvise(isoFd, written, 0, POSIX_FADV_WILLNEED);
+
+    const size_t bufSize = 16 * 1024 * 1024;
+    QByteArray buffers[2] = {QByteArray(static_cast<int>(bufSize), Qt::Uninitialized),
+                             QByteArray(static_cast<int>(bufSize), Qt::Uninitialized)};
+    const qint64 syncEvery = 256ll * 1024 * 1024;
     qint64 lastSync = written;
     int lastPercent = total > 0 ? static_cast<int>((written * 100) / total) : 0;
+    int slot = 0;
+    ssize_t pending = ::read(isoFd, buffers[0].data(),
+                             static_cast<size_t>(qMin<qint64>(bufSize, total - written)));
+    if (pending < 0) {
+        ::close(isoFd);
+        return fail(QStringLiteral("ISO read failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
+    }
 
-    while (written < total) {
-        const size_t chunk = static_cast<size_t>(qMin<qint64>(bufSize, total - written));
-        const ssize_t got = ::read(isoFd, buffer.data(), chunk);
-        if (got < 0) {
+    while (pending > 0) {
+        const int writeSlot = slot;
+        const ssize_t writeSize = pending;
+        bool writeOk = true;
+        int writeErrno = 0;
+        std::thread writer([&] {
+            if (!writeAll(devFd, buffers[writeSlot].constData(), static_cast<size_t>(writeSize))) {
+                writeOk = false;
+                writeErrno = errno;
+            }
+        });
+
+        slot ^= 1;
+        const qint64 remaining = total - written - writeSize;
+        ssize_t next = 0;
+        if (remaining > 0) {
+            next = ::read(isoFd, buffers[slot].data(),
+                          static_cast<size_t>(qMin<qint64>(bufSize, remaining)));
+        }
+        writer.join();
+        if (!writeOk) {
+            ::close(isoFd);
+            errno = writeErrno;
+            return fail(QStringLiteral("Device write failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
+        }
+        if (next < 0) {
             ::close(isoFd);
             return fail(QStringLiteral("ISO read failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
         }
-        if (got == 0)
-            break;
-        ssize_t off = 0;
-        while (off < got) {
-            const ssize_t put = ::write(devFd, buffer.constData() + off, static_cast<size_t>(got - off));
-            if (put < 0) {
-                ::close(isoFd);
-                return fail(QStringLiteral("Device write failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
-            }
-            off += put;
-        }
-        written += got;
+
+#ifdef __linux__
+        sync_file_range(devFd, written, writeSize, SYNC_FILE_RANGE_WRITE);
+#endif
+        written += writeSize;
         const int percent = total > 0 ? static_cast<int>((written * 100) / total) : 100;
         const bool syncNow = (written - lastSync) >= syncEvery || written == total;
         if (syncNow) {
-            if (::fsync(devFd) != 0) {
+            if (::fdatasync(devFd) != 0) {
                 ::close(isoFd);
-                return fail(QStringLiteral("fsync failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
+                return fail(QStringLiteral("fdatasync failed: %1").arg(QString::fromLocal8Bit(strerror(errno))));
             }
             lastSync = written;
             lastPercent = percent;
@@ -256,8 +315,10 @@ bool Flasher::writeIso()
             lastPercent = percent;
             emitBytes(proto::progress(written, total, QStringLiteral("Writing image..."), false));
         }
+        pending = next;
     }
 
+    posix_fadvise(isoFd, 0, 0, POSIX_FADV_DONTNEED);
     ::close(isoFd);
     return true;
 }
@@ -270,18 +331,28 @@ bool Flasher::createDataPartition()
     fdisk_disable_dialogs(cxt, 1);
     fdisk_enable_bootbits_protection(cxt, 1);
 
+    m_udisks.unmountTree(m_canonicalDevice);
     if (m_devFd < 0)
         m_devFd = m_udisks.openWriteFd(m_canonicalDevice);
     if (m_devFd < 0) {
         fdisk_unref_context(cxt);
         return fail(QStringLiteral("Cannot reopen device to partition leftover space: %1").arg(m_udisks.error));
     }
+    ::fsync(m_devFd);
+    ::lseek(m_devFd, 0, SEEK_SET);
     const int fdiskFd = ::dup(m_devFd);
-    if (fdiskFd < 0 || fdisk_assign_device_by_fd(cxt, fdiskFd, m_canonicalDevice.toUtf8().constData(), 0) != 0) {
-        if (fdiskFd >= 0)
-            ::close(fdiskFd);
+    if (fdiskFd < 0) {
         fdisk_unref_context(cxt);
-        return fail(QStringLiteral("Failed to open partition table on device"));
+        return fail(QStringLiteral("Failed to duplicate device descriptor"));
+    }
+    fdisk_enable_listonly(cxt, 1);
+    const int rc = fdisk_assign_device_by_fd(cxt, fdiskFd, m_canonicalDevice.toUtf8().constData(), 0);
+    fdisk_enable_listonly(cxt, 0);
+    if (rc != 0) {
+        ::close(fdiskFd);
+        fdisk_unref_context(cxt);
+        return fail(QStringLiteral("Failed to open partition table on device: %1")
+                        .arg(QString::fromLocal8Bit(strerror(rc < 0 ? -rc : errno))));
     }
 
     fdisk_set_last_lba(cxt, fdisk_get_nsectors(cxt) - 1);
@@ -359,20 +430,49 @@ bool Flasher::createDataPartition()
     fdisk_deassign_device(cxt, 0);
     fdisk_unref_context(cxt);
 
+    if (m_devFd >= 0) {
+        ::fsync(m_devFd);
+        ::close(m_devFd);
+        m_devFd = -1;
+    }
+    ::sync();
+
     m_dataPartition = partitionNode(static_cast<int>(partno) + 1);
     m_udisks.rescan(m_canonicalDevice);
-    for (int i = 0; i < 30 && !QFile::exists(m_dataPartition); ++i)
-        QThread::msleep(100);
+    QProcess::execute(QStringLiteral("udevadm"), {QStringLiteral("settle"), QStringLiteral("--timeout=10")});
+    for (int i = 0; i < 50 && !QFile::exists(m_dataPartition); ++i)
+        QThread::msleep(200);
     if (!QFile::exists(m_dataPartition))
         return fail(QStringLiteral("Data partition did not appear after partitioning"));
+    m_udisks.waitForBlock(m_dataPartition, 20000);
     return true;
 }
 
 bool Flasher::formatDataPartition()
 {
-    if (!m_udisks.formatPartition(m_dataPartition, filesystem, sanitizedLabel()))
-        return fail(QStringLiteral("Image written, but formatting leftover space failed: %1").arg(m_udisks.error));
-    return true;
+    m_udisks.unmountTree(m_canonicalDevice);
+    m_udisks.rescan(m_canonicalDevice);
+    QProcess::execute(QStringLiteral("udevadm"), {QStringLiteral("settle"), QStringLiteral("--timeout=10")});
+    m_udisks.waitForBlock(m_dataPartition, 20000);
+
+    const QString want = expectedFs(filesystem);
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        if (attempt > 0) {
+            QThread::msleep(2000);
+            m_udisks.rescan(m_canonicalDevice);
+            m_udisks.waitForBlock(m_dataPartition, 10000);
+        }
+        if (m_udisks.formatPartition(m_dataPartition, filesystem, sanitizedLabel()))
+            return true;
+        QThread::msleep(1500);
+        if (probeFs(m_dataPartition) == want)
+            return true;
+        if (!m_udisks.error.contains(QStringLiteral("Timed out"), Qt::CaseInsensitive))
+            break;
+    }
+    if (probeFs(m_dataPartition) == want)
+        return true;
+    return fail(QStringLiteral("Image written, but formatting leftover space failed: %1").arg(m_udisks.error));
 }
 
 QString Flasher::partitionNode(int partnoOneBased) const

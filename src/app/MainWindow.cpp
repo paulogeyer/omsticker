@@ -344,7 +344,7 @@ void MainWindow::rebuildDriveList()
         m_driveCombo->setItemData(m_driveCombo->count() - 1, drive.serial, Qt::UserRole + 3);
     }
     if (m_driveCombo->count() == 0)
-        m_driveCombo->addItem(QStringLiteral("No USB drive detected"));
+        m_driveCombo->addItem(QStringLiteral("No USB stick found"));
     const int index = m_driveCombo->findData(previous);
     if (index >= 0)
         m_driveCombo->setCurrentIndex(index);

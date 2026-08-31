@@ -3,8 +3,10 @@
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDBusUnixFileDescriptor>
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QProcess>
+#include <QThread>
 #include <QVariant>
 
 #include <unistd.h>
@@ -70,7 +72,7 @@ int UDisks::openWriteFd(const QString &device)
     QList<QVariant> reply;
     const QVariantMap options;
     if (!call(blockPath(device), QStringLiteral("org.freedesktop.UDisks2.Block"), QStringLiteral("OpenDevice"),
-              {QStringLiteral("w"), QVariant::fromValue(options)}, &reply))
+              {QStringLiteral("rw"), QVariant::fromValue(options)}, &reply))
         return -1;
     if (reply.isEmpty()) {
         error = QStringLiteral("UDisks2 returned no file descriptor");
@@ -96,6 +98,21 @@ bool UDisks::rescan(const QString &device)
                 {QVariant::fromValue(options)});
 }
 
+bool UDisks::waitForBlock(const QString &device, int timeoutMs)
+{
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < timeoutMs) {
+        QList<QVariant> reply;
+        if (call(blockPath(device), QStringLiteral("org.freedesktop.DBus.Properties"), QStringLiteral("Get"),
+                 {QStringLiteral("org.freedesktop.UDisks2.Block"), QStringLiteral("Device")}, &reply, 2000))
+            return true;
+        QThread::msleep(250);
+    }
+    error = QStringLiteral("Timed out waiting for %1").arg(device);
+    return false;
+}
+
 bool UDisks::formatPartition(const QString &partition, const QString &filesystem, const QString &label)
 {
     QVariantMap options;
@@ -105,5 +122,5 @@ bool UDisks::formatPartition(const QString &partition, const QString &filesystem
     if (filesystem == QLatin1String("fat32"))
         options.insert(QStringLiteral("label"), label.left(11).toUpper());
     return call(blockPath(partition), QStringLiteral("org.freedesktop.UDisks2.Block"), QStringLiteral("Format"),
-                {udisksFsType(filesystem), QVariant::fromValue(options)});
+                {udisksFsType(filesystem), QVariant::fromValue(options)}, nullptr, 180000);
 }
