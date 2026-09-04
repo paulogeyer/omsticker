@@ -2,6 +2,8 @@
 
 Qt6 USB creator for [Omarchy](https://omarchy.org/). It writes a bootable Omarchy ISO to a USB stick and turns the leftover space into a usable data partition.
 
+![OmSticker](data/screenshot.png)
+
 ## Features
 
 - Writes the Omarchy ISO as a hybrid image so the stick stays BIOS/UEFI bootable
