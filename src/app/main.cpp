@@ -9,7 +9,7 @@ int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("OmSticker"));
-    app.setApplicationVersion(QStringLiteral("0.9.0"));
+    app.setApplicationVersion(QStringLiteral("0.9.1"));
     app.setOrganizationName(QStringLiteral("Omarchy"));
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/omsticker.svg")));
     app.setStyle(QStyleFactory::create(QStringLiteral("Fusion")));
