@@ -7,7 +7,7 @@ int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("omsticker-helper"));
-    app.setApplicationVersion(QStringLiteral("1.0.0"));
+    app.setApplicationVersion(QStringLiteral("0.9.0"));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Privileged OmSticker USB writer"));
