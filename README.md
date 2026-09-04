@@ -41,6 +41,22 @@ Optional system install:
 sudo make install
 ```
 
+### Omarchy / Arch package
+
+Omarchy is Arch-based, so ship OmSticker as a normal Arch package (`PKGBUILD` in this repo).
+
+1. Bump `pkgver` / `pkgrel` in `PKGBUILD` when you release.
+2. Build and install locally:
+
+```bash
+makepkg -si
+```
+
+That installs `/usr/bin/omsticker`, `/usr/lib/omsticker/omsticker-helper`, the desktop entry, icon, and polkit policy.
+
+3. To distribute: publish the PKGBUILD on the [AUR](https://aur.archlinux.org/), or add the package to a personal/Omarchy repo (`repo-add` + pacman). Omarchy’s own image only picks it up if it is added to the Omarchy packaging tree.
+4. Runtime depends: `qt6-base`, `qt6-svg`, `udisks2`, `util-linux` (libfdisk), `polkit`, plus `mkfs` tools (`exfatprogs`, `dosfstools`, `e2fsprogs`; optional NTFS/Btrfs/XFS/F2FS).
+
 ## Usage
 
 1. Plug in a USB stick.
