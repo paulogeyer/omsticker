@@ -14,6 +14,7 @@ class QLabel;
 class QLineEdit;
 class QProgressBar;
 class QPushButton;
+class QTimer;
 
 class MainWindow : public QMainWindow
 {
@@ -44,6 +45,7 @@ private:
     QPushButton *m_browseButton = nullptr;
     QPushButton *m_downloadButton = nullptr;
     QPushButton *m_refreshButton = nullptr;
+    QTimer *m_scanTimer = nullptr;
     QElapsedTimer m_downloadClock;
     QElapsedTimer m_writeClock;
     WriteCheckpoint m_writeCheckpoint;
@@ -52,6 +54,7 @@ private:
     void rebuildDriveList();
     void detectExistingIso();
     void setBusy(bool busy);
+    void setStatus(const QString &text, const QString &role = QStringLiteral("hint"));
     void updateSpaceHint();
     void flash();
     bool confirmAbort();

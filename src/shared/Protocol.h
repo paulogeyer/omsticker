@@ -27,11 +27,14 @@ inline QByteArray progress(qint64 current, qint64 total, const QString &message,
                  {QStringLiteral("synced"), synced}});
 }
 
-inline QByteArray error(const QString &message, bool imageWritten = false)
+inline QByteArray error(const QString &message, bool imageWritten = false, bool clearCheckpoint = false)
 {
-    return line({{QStringLiteral("type"), QStringLiteral("error")},
-                 {QStringLiteral("message"), message},
-                 {QStringLiteral("imageWritten"), imageWritten}});
+    QJsonObject object{{QStringLiteral("type"), QStringLiteral("error")},
+                       {QStringLiteral("message"), message},
+                       {QStringLiteral("imageWritten"), imageWritten}};
+    if (clearCheckpoint)
+        object.insert(QStringLiteral("clearCheckpoint"), true);
+    return line(object);
 }
 
 inline QByteArray done(const QString &dataPartition, const QString &filesystem,

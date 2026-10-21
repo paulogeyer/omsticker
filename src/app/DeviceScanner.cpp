@@ -1,4 +1,5 @@
 #include "DeviceScanner.h"
+#include "BlockDevice.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -7,6 +8,20 @@
 #include <QJsonObject>
 #include <QLocale>
 #include <QProcess>
+
+namespace {
+
+bool jsonFlag(const QJsonValue &value)
+{
+    if (value.isBool())
+        return value.toBool();
+    if (value.isDouble())
+        return value.toInt() != 0;
+    const QString text = value.toString().trimmed();
+    return text == QLatin1String("1") || text.compare(QLatin1String("true"), Qt::CaseInsensitive) == 0;
+}
+
+}
 
 QString UsbDrive::displayName() const
 {
@@ -44,8 +59,7 @@ void DeviceScanner::refresh()
         if (obj.value(QStringLiteral("type")).toString() != QLatin1String("disk"))
             continue;
         const QString tran = obj.value(QStringLiteral("tran")).toString();
-        const bool removable = obj.value(QStringLiteral("rm")).toBool()
-            || obj.value(QStringLiteral("hotplug")).toBool();
+        const bool removable = jsonFlag(obj.value(QStringLiteral("rm")));
         const bool usb = tran == QLatin1String("usb");
         if (!usb && !removable)
             continue;
@@ -57,8 +71,11 @@ void DeviceScanner::refresh()
         drive.sizeBytes = obj.value(QStringLiteral("size")).toVariant().toLongLong();
         drive.usb = usb;
         drive.removable = removable;
-        if (!drive.path.isEmpty())
-            found.push_back(drive);
+        if (drive.path.isEmpty() || drive.sizeBytes <= 0)
+            continue;
+        if (holdsSystemMount(drive.path))
+            continue;
+        found.push_back(drive);
     }
     m_drives = found;
     lookupById();

@@ -229,11 +229,14 @@ MainWindow::MainWindow(QWidget *parent)
         setBusy(true);
         m_downloadButton->setEnabled(true);
         m_downloadButton->setText(QStringLiteral("Cancel download"));
-        m_status->setText(QStringLiteral("Finding latest Omarchy ISO..."));
+        setStatus(QStringLiteral("Finding latest Omarchy ISO..."));
     });
     connect(&m_downloader, &IsoDownloader::resolved, this,
-            [this](const QString &version, const QString &fileName) {
-                m_status->setText(QStringLiteral("Downloading Omarchy %1 (%2)...").arg(version, fileName));
+            [this](const QString &version, const QString &fileName, bool fallback) {
+                const QString text = fallback
+                    ? QStringLiteral("Could not find the latest ISO. Downloading Omarchy %1 (%2)...")
+                    : QStringLiteral("Downloading Omarchy %1 (%2)...");
+                setStatus(text.arg(version, fileName));
             });
     connect(&m_downloader, &IsoDownloader::progressChanged, this,
             [this](qint64 received, qint64 total) {
@@ -246,13 +249,13 @@ MainWindow::MainWindow(QWidget *parent)
                     m_progress->setRange(0, 0);
                 }
                 const QString ver = m_downloader.version();
-                m_status->setText(QStringLiteral("Downloading Omarchy %1… %2 / %3 · %4 · %5 left")
-                                      .arg(ver.isEmpty() ? QStringLiteral("ISO") : ver,
-                                           QLocale().formattedDataSize(received),
-                                           total > 0 ? QLocale().formattedDataSize(total)
-                                                     : QStringLiteral("?"),
-                                           formatSpeed(received, m_downloadClock.elapsed()),
-                                           formatEta(received, total, m_downloadClock.elapsed())));
+                setStatus(QStringLiteral("Downloading Omarchy %1… %2 / %3 · %4 · %5 left")
+                              .arg(ver.isEmpty() ? QStringLiteral("ISO") : ver,
+                                   QLocale().formattedDataSize(received),
+                                   total > 0 ? QLocale().formattedDataSize(total)
+                                             : QStringLiteral("?"),
+                                   formatSpeed(received, m_downloadClock.elapsed()),
+                                   formatEta(received, total, m_downloadClock.elapsed())));
             });
     connect(&m_downloader, &IsoDownloader::finished, this, [this](bool ok, const QString &value) {
         m_downloadButton->setText(QStringLiteral("Download latest Omarchy ISO"));
@@ -260,11 +263,11 @@ MainWindow::MainWindow(QWidget *parent)
         m_progress->setRange(0, 100);
         if (ok) {
             setIsoPath(value);
-            m_status->setText(QStringLiteral("Saved Omarchy %1 to %2")
-                                  .arg(m_downloader.version(), value));
+            setStatus(QStringLiteral("Saved Omarchy %1 to %2").arg(m_downloader.version(), value),
+                      QStringLiteral("ok"));
             m_progress->setValue(100);
         } else {
-            m_status->setText(value);
+            setStatus(value, QStringLiteral("warning"));
             m_progress->setValue(0);
         }
     });
@@ -283,7 +286,9 @@ MainWindow::MainWindow(QWidget *parent)
         else
             flash();
     });
-    connect(&m_flash, &FlashSession::statusChanged, m_status, &QLabel::setText);
+    connect(&m_flash, &FlashSession::statusChanged, this, [this](const QString &message) {
+        setStatus(message);
+    });
     connect(&m_flash, &FlashSession::progressChanged, this,
             [this](int percent, qint64 current, qint64 total, bool synced) {
                 if (!m_writeClock.isValid())
@@ -292,12 +297,12 @@ MainWindow::MainWindow(QWidget *parent)
                 m_progress->setValue(percent);
                 const qint64 session = qMax(qint64(0), current - m_writeOffsetStart);
                 const qint64 remainTotal = qMax(qint64(0), total - m_writeOffsetStart);
-                m_status->setText(QStringLiteral("Writing image… %1 / %2 · %3 · %4 left")
-                                      .arg(QLocale().formattedDataSize(current),
-                                           total > 0 ? QLocale().formattedDataSize(total)
-                                                     : QStringLiteral("?"),
-                                           formatSpeed(session, m_writeClock.elapsed()),
-                                           formatEta(session, remainTotal, m_writeClock.elapsed())));
+                setStatus(QStringLiteral("Writing image… %1 / %2 · %3 · %4 left")
+                              .arg(QLocale().formattedDataSize(current),
+                                   total > 0 ? QLocale().formattedDataSize(total)
+                                             : QStringLiteral("?"),
+                                   formatSpeed(session, m_writeClock.elapsed()),
+                                   formatEta(session, remainTotal, m_writeClock.elapsed())));
                 if (synced) {
                     m_writeCheckpoint.offset = current;
                     saveWriteCheckpoint(m_writeCheckpoint);
@@ -306,28 +311,38 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&m_flash, &FlashSession::finished, this, [this](bool ok, const QString &message) {
         m_flashButton->setText(QStringLiteral("Flash USB Stick"));
         setBusy(false);
-        m_status->setText(message);
-        m_status->setObjectName(ok ? QStringLiteral("ok") : QStringLiteral("warning"));
-        m_status->style()->unpolish(m_status);
-        m_status->style()->polish(m_status);
-        if (ok) {
-            m_progress->setValue(100);
-            clearWriteCheckpoint();
+        if (m_scanTimer)
+            m_scanTimer->start(2500);
+        QString text = message;
+        if (!ok && m_flash.cancelled()) {
+            if (m_writeCheckpoint.isoSize > 0 && m_writeCheckpoint.offset >= m_writeCheckpoint.isoSize) {
+                text = QStringLiteral("Write aborted after the image was fully written. The stick may already boot. "
+                                      "Flash again and choose Resume to finish leftover space.");
+            } else {
+                text = QStringLiteral("Write aborted. The USB stick is incomplete and not bootable until you resume or flash it again.");
+            }
+        } else if (!ok && m_flash.imageWritten() && !text.contains(QStringLiteral("Resume"))) {
+            text += QStringLiteral("\n\nFlash again and choose Resume to finish leftover space.");
         }
+        setStatus(text, ok ? QStringLiteral("ok") : QStringLiteral("warning"));
+        if (ok || m_flash.clearCheckpoint())
+            clearWriteCheckpoint(m_writeCheckpoint);
         QMessageBox box(this);
         box.setWindowTitle(ok ? QStringLiteral("Done")
                               : m_flash.cancelled() ? QStringLiteral("Aborted")
                                                     : QStringLiteral("Flash failed"));
-        box.setText(message);
+        box.setText(text);
+        if (ok)
+            m_progress->setValue(100);
         box.setIcon(ok ? QMessageBox::Information
                        : m_flash.cancelled() ? QMessageBox::Warning : QMessageBox::Critical);
         box.exec();
         m_scanner.refresh();
     });
 
-    auto *timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, &m_scanner, &DeviceScanner::refresh);
-    timer->start(2500);
+    m_scanTimer = new QTimer(this);
+    connect(m_scanTimer, &QTimer::timeout, &m_scanner, &DeviceScanner::refresh);
+    m_scanTimer->start(2500);
     m_scanner.refresh();
     detectExistingIso();
     updateSpaceHint();
@@ -361,15 +376,26 @@ void MainWindow::detectExistingIso()
         setIsoPath(matches.first().absoluteFilePath());
 }
 
+void MainWindow::setStatus(const QString &text, const QString &role)
+{
+    m_status->setText(text);
+    if (m_status->objectName() == role)
+        return;
+    m_status->setObjectName(role);
+    m_status->style()->unpolish(m_status);
+    m_status->style()->polish(m_status);
+}
+
 void MainWindow::setBusy(bool busy)
 {
     m_isoEdit->setEnabled(!busy);
     m_browseButton->setEnabled(!busy);
     m_driveCombo->setEnabled(!busy);
     m_refreshButton->setEnabled(!busy);
-    m_fsCombo->setEnabled(!busy && m_dataCheck->isChecked());
-    m_labelEdit->setEnabled(!busy && m_dataCheck->isChecked());
-    m_dataCheck->setEnabled(!busy);
+    const bool canFormat = m_fsCombo->count() > 0;
+    m_dataCheck->setEnabled(!busy && canFormat);
+    m_fsCombo->setEnabled(!busy && canFormat && m_dataCheck->isChecked());
+    m_labelEdit->setEnabled(!busy && canFormat && m_dataCheck->isChecked());
     m_flashButton->setEnabled(!busy);
     m_downloadButton->setEnabled(!busy || m_downloader.running());
 }
@@ -385,8 +411,17 @@ void MainWindow::updateSpaceHint()
 
     const qint64 driveSize = selectedDriveSize();
     const qint64 isoSize = iso.exists() ? iso.size() : 0;
-    m_fsCombo->setEnabled(m_dataCheck->isChecked() && !m_flash.running());
-    m_labelEdit->setEnabled(m_dataCheck->isChecked() && !m_flash.running());
+    const bool canFormat = m_fsCombo->count() > 0;
+    if (!canFormat) {
+        m_dataCheck->setChecked(false);
+        m_dataCheck->setEnabled(false);
+    }
+    m_fsCombo->setEnabled(canFormat && m_dataCheck->isChecked() && !m_flash.running() && !m_downloader.running());
+    m_labelEdit->setEnabled(canFormat && m_dataCheck->isChecked() && !m_flash.running() && !m_downloader.running());
+    if (!canFormat) {
+        m_spaceHint->setText(QStringLiteral("No mkfs tool is installed, so leftover space cannot be formatted."));
+        return;
+    }
 
     if (driveSize <= 0) {
         m_spaceHint->setText(QStringLiteral("Plug in a USB stick to continue."));
@@ -423,6 +458,11 @@ void MainWindow::flash()
         QMessageBox::warning(this, QStringLiteral("No drive"), QStringLiteral("Select a USB drive."));
         return;
     }
+    if (m_dataCheck->isChecked() && selectedFilesystem().isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("No filesystem tool"),
+                             QStringLiteral("Install an mkfs tool, or turn off leftover space."));
+        return;
+    }
     const QFileInfo isoInfo(iso);
     const QString isoAbs = isoInfo.absoluteFilePath();
     const qint64 isoSize = isoInfo.size();
@@ -432,8 +472,14 @@ void MainWindow::flash()
     const qint64 leftover = driveSize - isoSize;
 
     qint64 offset = 0;
-    const WriteCheckpoint previous = loadWriteCheckpoint();
-    if (previous.offset > 0 && previous.matches(isoAbs, isoSize, isoMtime, device, serial, driveSize)) {
+    WriteCheckpoint previous;
+    for (const WriteCheckpoint &candidate : loadWriteCheckpoints()) {
+        if (candidate.matches(isoAbs, isoSize, isoMtime, device, serial, driveSize)) {
+            previous = candidate;
+            break;
+        }
+    }
+    if (previous.offset > 0) {
         QMessageBox box(this);
         box.setIcon(QMessageBox::Question);
         box.setWindowTitle(QStringLiteral("Resume write?"));
@@ -453,8 +499,6 @@ void MainWindow::flash()
             offset = qMin(previous.offset, isoSize);
         else if (box.clickedButton() == box.button(QMessageBox::Cancel) || !box.clickedButton())
             return;
-        else
-            clearWriteCheckpoint();
     }
 
     if (offset == 0) {
@@ -485,11 +529,13 @@ void MainWindow::flash()
     m_writeOffsetStart = offset;
 
     setBusy(true);
+    if (m_scanTimer)
+        m_scanTimer->stop();
     m_flashButton->setEnabled(true);
     m_flashButton->setText(QStringLiteral("Abort write"));
     m_progress->setValue(isoSize > 0 ? static_cast<int>((offset * 100) / isoSize) : 0);
     m_writeClock.invalidate();
-    m_status->setText(offset > 0 ? QStringLiteral("Resuming...") : QStringLiteral("Starting..."));
+    setStatus(offset > 0 ? QStringLiteral("Resuming...") : QStringLiteral("Starting..."));
     m_flash.start(isoAbs, device, selectedFilesystem(),
                   m_labelEdit->text().trimmed().isEmpty() ? QStringLiteral("OMARCHY")
                                                           : m_labelEdit->text().trimmed(),
@@ -520,7 +566,9 @@ QString MainWindow::selectedDriveSerial() const
 QString MainWindow::selectedFilesystem() const
 {
     const QString id = m_fsCombo->currentData().toString();
-    return id.isEmpty() ? QStringLiteral("exfat") : id;
+    if (!id.isEmpty())
+        return id;
+    return m_dataCheck->isChecked() ? QString() : QStringLiteral("exfat");
 }
 
 void MainWindow::setIsoPath(const QString &path)
@@ -534,7 +582,8 @@ bool MainWindow::confirmAbort()
     return QMessageBox::warning(
                this, QStringLiteral("Abort write?"),
                QStringLiteral("This stops the write immediately.\n\n"
-                              "The USB stick will be incomplete and not bootable until you flash it again."),
+                              "The USB stick will be incomplete and not bootable until you resume or flash it again. "
+               "A write aborted after the image is fully written may still boot."),
                QMessageBox::Cancel | QMessageBox::Ok, QMessageBox::Cancel)
         == QMessageBox::Ok;
 }
@@ -544,7 +593,7 @@ void MainWindow::abortWrite()
     if (!m_flash.running() || !confirmAbort())
         return;
     m_flashButton->setEnabled(false);
-    m_status->setText(QStringLiteral("Aborting..."));
+    setStatus(QStringLiteral("Aborting..."));
     m_flash.cancel();
 }
 

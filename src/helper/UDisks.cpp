@@ -1,15 +1,19 @@
 #include "UDisks.h"
+#include "BlockDevice.h"
 
 #include <QDBusConnection>
 #include <QDBusMessage>
 #include <QDBusUnixFileDescriptor>
 #include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
-#include <QProcess>
 #include <QThread>
 #include <QVariant>
 
+#include <fcntl.h>
 #include <unistd.h>
+
+#include <algorithm>
 
 namespace {
 
@@ -18,6 +22,56 @@ QString udisksFsType(const QString &filesystem)
     if (filesystem == QLatin1String("fat32"))
         return QStringLiteral("vfat");
     return filesystem;
+}
+
+struct BusyNodes {
+    QStringList mounts;
+    QStringList swaps;
+};
+
+BusyNodes busyNodes(const QString &device)
+{
+    const QString canonical = QFileInfo(device).canonicalFilePath();
+    const QStringList related = deviceAndHolders(device);
+    BusyNodes busy;
+
+    auto relatedTo = [&](const QString &node) {
+        const QString source = QFileInfo(unescapeMountField(node)).canonicalFilePath();
+        if (source.isEmpty())
+            return QString();
+        if (related.contains(source) || isChildBlockDevice(canonical, source))
+            return source;
+        return QString();
+    };
+
+    QFile mounts(QStringLiteral("/proc/mounts"));
+    if (mounts.open(QIODevice::ReadOnly)) {
+        while (!mounts.atEnd()) {
+            const QString line = QString::fromUtf8(mounts.readLine()).trimmed();
+            if (line.isEmpty())
+                continue;
+            const QStringList parts = line.split(QLatin1Char(' '));
+            if (parts.isEmpty())
+                continue;
+            const QString source = relatedTo(parts[0]);
+            if (!source.isEmpty() && !busy.mounts.contains(source))
+                busy.mounts << source;
+        }
+    }
+
+    QFile swaps(QStringLiteral("/proc/swaps"));
+    if (swaps.open(QIODevice::ReadOnly)) {
+        swaps.readLine();
+        while (!swaps.atEnd()) {
+            const QString line = QString::fromUtf8(swaps.readLine()).simplified();
+            if (line.isEmpty())
+                continue;
+            const QString source = relatedTo(line.section(QLatin1Char(' '), 0, 0));
+            if (!source.isEmpty() && !busy.swaps.contains(source))
+                busy.swaps << source;
+        }
+    }
+    return busy;
 }
 
 }
@@ -48,21 +102,34 @@ bool UDisks::call(const QString &path, const QString &interface, const QString &
 
 bool UDisks::unmountTree(const QString &device)
 {
-    QProcess lsblk;
-    lsblk.start(QStringLiteral("lsblk"),
-                {QStringLiteral("-ln"), QStringLiteral("-o"), QStringLiteral("PATH,MOUNTPOINT"), device});
-    lsblk.waitForFinished(5000);
-    const QString output = QString::fromUtf8(lsblk.readAllStandardOutput());
-    for (const QString &line : output.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
-        const QStringList cols = line.split(QLatin1Char(' '), Qt::SkipEmptyParts);
-        if (cols.size() < 2)
-            continue;
-        const QString mountpoint = cols.mid(1).join(QLatin1Char(' '));
-        if (mountpoint.isEmpty() || mountpoint == QLatin1String("[SWAP]"))
-            continue;
-        QVariantMap options{{QStringLiteral("force"), true}};
-        call(blockPath(cols.first()), QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
-             QStringLiteral("Unmount"), {QVariant::fromValue(options)});
+    const BusyNodes busy = busyNodes(device);
+    QStringList failures;
+    for (const QString &source : busy.swaps) {
+        const QVariantMap options;
+        if (!call(blockPath(source), QStringLiteral("org.freedesktop.UDisks2.Swapspace"),
+                  QStringLiteral("Stop"), {QVariant::fromValue(options)}))
+            failures << QStringLiteral("%1 (%2)").arg(source, error);
+    }
+    const QString canonical = QFileInfo(device).canonicalFilePath();
+    QStringList mounts = busy.mounts;
+    std::sort(mounts.begin(), mounts.end(), [&](const QString &a, const QString &b) {
+        return isChildBlockDevice(canonical, a) < isChildBlockDevice(canonical, b);
+    });
+    for (const QString &source : mounts) {
+        const QVariantMap options{{QStringLiteral("force"), true}};
+        if (!call(blockPath(source), QStringLiteral("org.freedesktop.UDisks2.Filesystem"),
+                  QStringLiteral("Unmount"), {QVariant::fromValue(options)}))
+            failures << QStringLiteral("%1 (%2)").arg(source, error);
+    }
+    if (!failures.isEmpty()) {
+        error = QStringLiteral("Could not unmount the drive: %1").arg(failures.join(QStringLiteral("; ")));
+        return false;
+    }
+    const BusyNodes stillBusy = busyNodes(device);
+    if (!stillBusy.mounts.isEmpty() || !stillBusy.swaps.isEmpty()) {
+        error = QStringLiteral("Drive is still mounted or in use as swap: %1")
+                    .arg((stillBusy.mounts + stillBusy.swaps).join(QStringLiteral(", ")));
+        return false;
     }
     return true;
 }
@@ -70,7 +137,8 @@ bool UDisks::unmountTree(const QString &device)
 int UDisks::openWriteFd(const QString &device)
 {
     QList<QVariant> reply;
-    const QVariantMap options;
+    QVariantMap options;
+    options.insert(QStringLiteral("flags"), static_cast<int>(O_EXCL | O_CLOEXEC));
     if (!call(blockPath(device), QStringLiteral("org.freedesktop.UDisks2.Block"), QStringLiteral("OpenDevice"),
               {QStringLiteral("rw"), QVariant::fromValue(options)}, &reply))
         return -1;
@@ -83,7 +151,7 @@ int UDisks::openWriteFd(const QString &device)
         error = QStringLiteral("Invalid file descriptor from UDisks2");
         return -1;
     }
-    const int duped = ::dup(fd.fileDescriptor());
+    const int duped = ::fcntl(fd.fileDescriptor(), F_DUPFD_CLOEXEC, 0);
     if (duped < 0) {
         error = QStringLiteral("Failed to duplicate device descriptor");
         return -1;
@@ -119,8 +187,6 @@ bool UDisks::formatPartition(const QString &partition, const QString &filesystem
     if (!label.isEmpty())
         options.insert(QStringLiteral("label"), label);
     options.insert(QStringLiteral("update-partition-type"), true);
-    if (filesystem == QLatin1String("fat32"))
-        options.insert(QStringLiteral("label"), label.left(11).toUpper());
     return call(blockPath(partition), QStringLiteral("org.freedesktop.UDisks2.Block"), QStringLiteral("Format"),
-                {udisksFsType(filesystem), QVariant::fromValue(options)}, nullptr, 180000);
+                {udisksFsType(filesystem), QVariant::fromValue(options)}, nullptr, 600000);
 }

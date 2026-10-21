@@ -1,4 +1,5 @@
 #include "Flasher.h"
+#include "Version.h"
 
 #include <QCommandLineParser>
 #include <QCoreApplication>
@@ -7,7 +8,7 @@ int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("omsticker-helper"));
-    app.setApplicationVersion(QStringLiteral("0.9.1"));
+    app.setApplicationVersion(QString::fromUtf8(kVersion));
 
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("Privileged OmSticker USB writer"));

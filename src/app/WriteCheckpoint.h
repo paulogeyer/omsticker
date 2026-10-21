@@ -2,10 +2,13 @@
 
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QString>
+#include <QVector>
 
 struct WriteCheckpoint {
     QString isoPath;
@@ -19,13 +22,26 @@ struct WriteCheckpoint {
     bool matches(const QString &iso, qint64 size, qint64 mtime, const QString &device,
                  const QString &serial, qint64 driveSize) const
     {
+        if (offset <= 0)
+            return false;
         if (isoPath != iso || isoSize != size || isoMtime != mtime || deviceSize != driveSize)
             return false;
-        if (!deviceSerial.isEmpty() && !serial.isEmpty())
-            return deviceSerial == serial;
-        return devicePath == device;
+        if (devicePath != device)
+            return false;
+        if (!deviceSerial.isEmpty() && !serial.isEmpty() && deviceSerial != serial)
+            return false;
+        return true;
     }
 };
+
+inline bool sameCheckpointDevice(const WriteCheckpoint &a, const WriteCheckpoint &b)
+{
+    if (a.devicePath != b.devicePath || a.deviceSize != b.deviceSize)
+        return false;
+    if (!a.deviceSerial.isEmpty() && !b.deviceSerial.isEmpty() && a.deviceSerial != b.deviceSerial)
+        return false;
+    return true;
+}
 
 inline QString writeCheckpointPath()
 {
@@ -34,13 +50,9 @@ inline QString writeCheckpointPath()
     return dir + QStringLiteral("/write-checkpoint.json");
 }
 
-inline WriteCheckpoint loadWriteCheckpoint()
+inline WriteCheckpoint checkpointFromJson(const QJsonObject &obj)
 {
-    QFile file(writeCheckpointPath());
     WriteCheckpoint checkpoint;
-    if (!file.open(QIODevice::ReadOnly))
-        return checkpoint;
-    const QJsonObject obj = QJsonDocument::fromJson(file.readAll()).object();
     checkpoint.isoPath = obj.value(QStringLiteral("isoPath")).toString();
     checkpoint.isoSize = obj.value(QStringLiteral("isoSize")).toVariant().toLongLong();
     checkpoint.isoMtime = obj.value(QStringLiteral("isoMtime")).toVariant().toLongLong();
@@ -51,22 +63,70 @@ inline WriteCheckpoint loadWriteCheckpoint()
     return checkpoint;
 }
 
-inline void saveWriteCheckpoint(const WriteCheckpoint &checkpoint)
+inline QJsonObject checkpointToJson(const WriteCheckpoint &checkpoint)
 {
-    QJsonObject obj{{QStringLiteral("isoPath"), checkpoint.isoPath},
-                    {QStringLiteral("isoSize"), checkpoint.isoSize},
-                    {QStringLiteral("isoMtime"), checkpoint.isoMtime},
-                    {QStringLiteral("devicePath"), checkpoint.devicePath},
-                    {QStringLiteral("deviceSerial"), checkpoint.deviceSerial},
-                    {QStringLiteral("deviceSize"), checkpoint.deviceSize},
-                    {QStringLiteral("offset"), checkpoint.offset}};
-    QFile file(writeCheckpointPath());
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return;
-    file.write(QJsonDocument(obj).toJson(QJsonDocument::Compact));
+    return {{QStringLiteral("isoPath"), checkpoint.isoPath},
+            {QStringLiteral("isoSize"), checkpoint.isoSize},
+            {QStringLiteral("isoMtime"), checkpoint.isoMtime},
+            {QStringLiteral("devicePath"), checkpoint.devicePath},
+            {QStringLiteral("deviceSerial"), checkpoint.deviceSerial},
+            {QStringLiteral("deviceSize"), checkpoint.deviceSize},
+            {QStringLiteral("offset"), checkpoint.offset}};
 }
 
-inline void clearWriteCheckpoint()
+inline QVector<WriteCheckpoint> loadWriteCheckpoints()
 {
-    QFile::remove(writeCheckpointPath());
+    QFile file(writeCheckpointPath());
+    QVector<WriteCheckpoint> checkpoints;
+    if (!file.open(QIODevice::ReadOnly))
+        return checkpoints;
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    QJsonArray array;
+    if (doc.isArray())
+        array = doc.array();
+    else if (doc.isObject())
+        array.append(doc.object());
+    for (const QJsonValue &value : array) {
+        const WriteCheckpoint checkpoint = checkpointFromJson(value.toObject());
+        if (!checkpoint.isoPath.isEmpty() && !checkpoint.devicePath.isEmpty())
+            checkpoints.push_back(checkpoint);
+    }
+    return checkpoints;
+}
+
+inline void writeCheckpointFile(const QVector<WriteCheckpoint> &checkpoints)
+{
+    QJsonArray array;
+    const int limit = qMin(checkpoints.size(), 8);
+    for (int i = 0; i < limit; ++i)
+        array.append(checkpointToJson(checkpoints.at(i)));
+    QSaveFile file(writeCheckpointPath());
+    if (!file.open(QIODevice::WriteOnly))
+        return;
+    file.write(QJsonDocument(array).toJson(QJsonDocument::Compact));
+    file.commit();
+}
+
+inline void saveWriteCheckpoint(const WriteCheckpoint &checkpoint)
+{
+    QVector<WriteCheckpoint> kept;
+    kept.push_back(checkpoint);
+    for (const WriteCheckpoint &existing : loadWriteCheckpoints()) {
+        if (!sameCheckpointDevice(existing, checkpoint))
+            kept.push_back(existing);
+    }
+    writeCheckpointFile(kept);
+}
+
+inline void clearWriteCheckpoint(const WriteCheckpoint &checkpoint)
+{
+    QVector<WriteCheckpoint> kept;
+    for (const WriteCheckpoint &existing : loadWriteCheckpoints()) {
+        if (!sameCheckpointDevice(existing, checkpoint))
+            kept.push_back(existing);
+    }
+    if (kept.isEmpty())
+        QFile::remove(writeCheckpointPath());
+    else
+        writeCheckpointFile(kept);
 }

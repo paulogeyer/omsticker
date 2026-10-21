@@ -6,7 +6,7 @@ TARGET = omsticker-helper
 DESTDIR = $$PWD/../../build
 
 SOURCES = main.cpp Flasher.cpp UDisks.cpp
-HEADERS = Flasher.h UDisks.h ../shared/Protocol.h
+HEADERS = Flasher.h UDisks.h ../shared/Protocol.h ../shared/Version.h ../shared/BlockDevice.h
 INCLUDEPATH += ../shared
 
 PKGCONFIG += fdisk

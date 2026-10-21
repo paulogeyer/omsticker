@@ -23,12 +23,13 @@ private:
     bool m_imageWritten = false;
     int m_devFd = -1;
 
-    bool fail(const QString &message);
+    bool fail(const QString &message, bool clearCheckpoint = false);
     bool validateIso();
     bool validateDevice();
-    bool isSystemDisk(const QString &device) const;
     bool isUsbOrRemovable(const QString &sysName) const;
     bool unmountDevice();
+    int openDevice();
+    bool verifyWrittenPrefix(int isoFd, int devFd, qint64 offset);
     bool writeIso();
     bool createDataPartition();
     bool formatDataPartition();

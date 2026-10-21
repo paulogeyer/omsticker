@@ -66,7 +66,7 @@ That installs `/usr/bin/omsticker`, `/usr/lib/omsticker/omsticker-helper`, the d
 
 Omarchy needs Secure Boot / TPM off in firmware to boot the stick.
 
-Aborting or killing the write leaves the stick unbootable until you resume or flash it again. Resume only works for the same ISO and the same USB.
+Aborting during the image write leaves the stick unbootable until you resume or flash it again. If the image was already fully written, the stick may boot; resume finishes leftover space. Resume only works for the same ISO and the same USB, and the writer checks that the bytes already on the stick match the ISO.
 
 ## How leftover space works
 

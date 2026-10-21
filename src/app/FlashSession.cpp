@@ -8,9 +8,10 @@
 
 FlashSession::FlashSession(QObject *parent)
     : QObject(parent)
+    , m_process(std::make_unique<QProcess>())
 {
-    connect(&m_process, &QProcess::readyReadStandardOutput, this, [this] {
-        m_buffer += m_process.readAllStandardOutput();
+    connect(m_process.get(), &QProcess::readyReadStandardOutput, this, [this] {
+        m_buffer += m_process->readAllStandardOutput();
         while (true) {
             const int newline = m_buffer.indexOf('\n');
             if (newline < 0)
@@ -20,7 +21,9 @@ FlashSession::FlashSession(QObject *parent)
             handleLine(line);
         }
     });
-    connect(&m_process, &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
+    connect(m_process.get(), &QProcess::readyReadStandardError, this, [this] { drainStderr(); });
+    connect(m_process.get(), &QProcess::finished, this, [this](int code, QProcess::ExitStatus status) {
+        drainStderr();
         if (!m_buffer.isEmpty()) {
             handleLine(m_buffer);
             m_buffer.clear();
@@ -28,11 +31,13 @@ FlashSession::FlashSession(QObject *parent)
         if (m_reported)
             return;
         if (m_cancelled) {
-            report(false, QStringLiteral("Write aborted. The USB stick is incomplete and not bootable until you flash it again."));
+            report(false, QStringLiteral("Write aborted."));
             return;
         }
+        const QString detail = QString::fromLocal8Bit(m_stderr).trimmed();
         if (status != QProcess::NormalExit) {
-            report(false, QStringLiteral("Helper process crashed"));
+            report(false, detail.isEmpty() ? QStringLiteral("Helper process crashed")
+                                           : QStringLiteral("Helper process crashed: %1").arg(detail.left(500)));
             return;
         }
         if (code == 0) {
@@ -41,9 +46,35 @@ FlashSession::FlashSession(QObject *parent)
         }
         if (code == 126 || code == 127)
             report(false, QStringLiteral("Could not start the USB writer"));
-        else
+        else if (detail.isEmpty())
             report(false, QStringLiteral("Flash helper failed"));
+        else
+            report(false, QStringLiteral("Flash helper failed: %1").arg(detail.left(500)));
     });
+}
+
+FlashSession::~FlashSession()
+{
+    if (!m_process)
+        return;
+    if (m_process->state() != QProcess::NotRunning) {
+        m_cancelled = true;
+        m_process->kill();
+        m_process->waitForFinished(200);
+    }
+    if (m_process->state() != QProcess::NotRunning) {
+        m_process->disconnect();
+        m_process.release();
+    }
+}
+
+void FlashSession::drainStderr()
+{
+    if (!m_process)
+        return;
+    m_stderr += m_process->readAllStandardError();
+    if (m_stderr.size() > 8192)
+        m_stderr = m_stderr.right(8192);
 }
 
 void FlashSession::report(bool ok, const QString &message)
@@ -67,7 +98,7 @@ QString FlashSession::helperPath()
 
 bool FlashSession::running() const
 {
-    return m_process.state() != QProcess::NotRunning;
+    return m_process && m_process->state() != QProcess::NotRunning;
 }
 
 void FlashSession::start(const QString &iso, const QString &device, const QString &filesystem,
@@ -76,8 +107,11 @@ void FlashSession::start(const QString &iso, const QString &device, const QStrin
     if (running())
         return;
     m_buffer.clear();
+    m_stderr.clear();
     m_reported = false;
     m_cancelled = false;
+    m_imageWritten = false;
+    m_clearCheckpoint = false;
     const QString helper = helperPath();
     if (!QFileInfo::exists(helper)) {
         report(false, QStringLiteral("USB writer helper was not found"));
@@ -88,7 +122,7 @@ void FlashSession::start(const QString &iso, const QString &device, const QStrin
                      QStringLiteral("--offset"), QString::number(offset)};
     if (!dataPartition)
         args << QStringLiteral("--no-data-partition");
-    m_process.start(helper, args);
+    m_process->start(helper, args);
 }
 
 void FlashSession::cancel()
@@ -96,8 +130,7 @@ void FlashSession::cancel()
     if (!running())
         return;
     m_cancelled = true;
-    m_process.kill();
-    m_process.waitForFinished(3000);
+    m_process->kill();
 }
 
 void FlashSession::handleLine(const QByteArray &line)
@@ -115,6 +148,8 @@ void FlashSession::handleLine(const QByteArray &line)
         const int percent = total > 0 ? static_cast<int>((current * 100) / total) : 0;
         emit progressChanged(percent, current, total, obj.value(QStringLiteral("synced")).toBool());
     } else if (type == QLatin1String("error")) {
+        m_imageWritten = obj.value(QStringLiteral("imageWritten")).toBool();
+        m_clearCheckpoint = obj.value(QStringLiteral("clearCheckpoint")).toBool();
         report(false, obj.value(QStringLiteral("message")).toString());
     } else if (type == QLatin1String("done")) {
         const QString warning = obj.value(QStringLiteral("warning")).toString();
