@@ -14,7 +14,7 @@ optdepends=(
 )
 makedepends=('qt6-base' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('364f473db0e49c4e0a3260880101c179ea41f34d4894dc84ba70bbd0dd32792b')
 
 build() {
     cd "$srcdir/$pkgname-$pkgver"
